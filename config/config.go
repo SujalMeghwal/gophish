@@ -2,12 +2,14 @@ package config
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"fmt"
+	"os"
+	"path/filepath"
 
 	log "github.com/gophish/gophish/logger"
 )
 
-// AdminServer represents the Admin server configuration details
+// AdminServer represents the Admin server configuration details.
 type AdminServer struct {
 	ListenURL            string   `json:"listen_url"`
 	UseTLS               bool     `json:"use_tls"`
@@ -18,7 +20,7 @@ type AdminServer struct {
 	TrustedOrigins       []string `json:"trusted_origins"`
 }
 
-// PhishServer represents the Phish server configuration details
+// PhishServer represents the Phish server configuration details.
 type PhishServer struct {
 	ListenURL string `json:"listen_url"`
 	UseTLS    bool   `json:"use_tls"`
@@ -26,7 +28,7 @@ type PhishServer struct {
 	KeyPath   string `json:"key_path"`
 }
 
-// Config represents the configuration information.
+// Config holds the overall configuration for the application.
 type Config struct {
 	AdminConf      AdminServer `json:"admin_server"`
 	PhishConf      PhishServer `json:"phish_server"`
@@ -42,27 +44,50 @@ type Config struct {
 // Version contains the current gophish version
 var Version = ""
 
-// ServerName is the server type that is returned in the transparency response.
+// ServerName is the server type returned in the transparency response.
 const ServerName = "gophish"
 
-// LoadConfig loads the configuration from the specified filepath
-func LoadConfig(filepath string) (*Config, error) {
-	// Get the config file
-	configFile, err := ioutil.ReadFile(filepath)
+// LoadConfig loads and parses the configuration from the specified file path.
+// It performs validation and applies default values where appropriate.
+func LoadConfig(filePath string) (*Config, error) {
+	// Open the config file
+	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open config file %q: %w", filePath, err)
 	}
-	config := &Config{}
-	err = json.Unmarshal(configFile, config)
-	if err != nil {
-		return nil, err
+	defer file.Close()
+
+	// Decode JSON directly from the file stream
+	decoder := json.NewDecoder(file)
+	cfg := &Config{}
+	if err := decoder.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("failed to decode config JSON: %w", err)
 	}
-	if config.Logging == nil {
-		config.Logging = &log.Config{}
+
+	// Initialize Logging config if missing
+	if cfg.Logging == nil {
+		cfg.Logging = &log.Config{}
 	}
-	// Choosing the migrations directory based on the database used.
-	config.MigrationsPath = config.MigrationsPath + config.DBName
-	// Explicitly set the TestFlag to false to prevent config.json overrides
-	config.TestFlag = false
-	return config, nil
+
+	// Clean and join migration path with DBName to prevent path issues
+	cfg.MigrationsPath = filepath.Clean(cfg.MigrationsPath)
+	if cfg.DBName != "" {
+		cfg.MigrationsPath = filepath.Join(cfg.MigrationsPath, cfg.DBName)
+	}
+
+	// Explicitly disable test flag regardless of config file content
+	cfg.TestFlag = false
+
+	// Optional: Validate critical fields to catch config errors early
+	if cfg.AdminConf.ListenURL == "" {
+		return nil, fmt.Errorf("admin_server.listen_url cannot be empty")
+	}
+	if cfg.PhishConf.ListenURL == "" {
+		return nil, fmt.Errorf("phish_server.listen_url cannot be empty")
+	}
+	if cfg.DBPath == "" {
+		return nil, fmt.Errorf("db_path cannot be empty")
+	}
+
+	return cfg, nil
 }
