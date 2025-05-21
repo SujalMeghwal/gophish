@@ -10,52 +10,69 @@ import (
 	"github.com/PuerkitoBio/goquery"
 )
 
+// attemptLogin handles the login POST flow including fetching a fresh CSRF token.
 func attemptLogin(t *testing.T, ctx *testContext, client *http.Client, username, password, optionalPath string) *http.Response {
-	resp, err := http.Get(fmt.Sprintf("%s/login", ctx.adminServer.URL))
+	t.Helper()
+
+	loginURL := fmt.Sprintf("%s/login", ctx.adminServer.URL)
+	
+	// Step 1: GET login page to fetch CSRF token and cookie
+	resp, err := http.Get(loginURL)
 	if err != nil {
 		t.Fatalf("error requesting the /login endpoint: %v", err)
 	}
-	got := resp.StatusCode
-	expected := http.StatusOK
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("invalid status code received from /login page. expected %d got %d", http.StatusOK, resp.StatusCode)
 	}
 
-	doc, err := goquery.NewDocumentFromResponse(resp)
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		t.Fatalf("error parsing /login response body")
+		t.Fatalf("error parsing /login response body: %v", err)
 	}
-	elem := doc.Find("input[name='csrf_token']").First()
-	token, ok := elem.Attr("value")
-	if !ok {
+
+	token, exists := doc.Find("input[name='csrf_token']").Attr("value")
+	if !exists {
 		t.Fatal("unable to find csrf_token value in login response")
 	}
+
 	if client == nil {
 		client = &http.Client{}
 	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/login%s", ctx.adminServer.URL, optionalPath), strings.NewReader(url.Values{
+	// Step 2: POST login credentials with CSRF token and cookies
+	formData := url.Values{
 		"username":   {username},
 		"password":   {password},
 		"csrf_token": {token},
-	}.Encode()))
-	if err != nil {
-		t.Fatalf("error creating new /login request: %v", err)
 	}
 
-	req.Header.Set("Cookie", resp.Header.Get("Set-Cookie"))
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	req, err := http.NewRequest("POST", loginURL+optionalPath, strings.NewReader(formData.Encode()))
+	if err != nil {
+		t.Fatalf("error creating POST /login request: %v", err)
+	}
+
+	// Pass the Set-Cookie from the GET to the POST request
+	if cookie := resp.Header.Get("Set-Cookie"); cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err = client.Do(req)
 	if err != nil {
-		t.Fatalf("error requesting the /login endpoint: %v", err)
+		t.Fatalf("error sending POST /login request: %v", err)
 	}
+
 	return resp
 }
 
+// TestLoginCSRF verifies that login POST without CSRF token is forbidden.
 func TestLoginCSRF(t *testing.T) {
 	ctx := setupTest(t)
 	defer tearDown(t, ctx)
+
 	resp, err := http.PostForm(fmt.Sprintf("%s/login", ctx.adminServer.URL),
 		url.Values{
 			"username": {"admin"},
@@ -63,68 +80,80 @@ func TestLoginCSRF(t *testing.T) {
 		})
 
 	if err != nil {
-		t.Fatalf("error requesting the /login endpoint: %v", err)
+		t.Fatalf("error sending POST /login: %v", err)
 	}
+	defer resp.Body.Close()
 
-	got := resp.StatusCode
-	expected := http.StatusForbidden
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected status %d but got %d", http.StatusForbidden, resp.StatusCode)
 	}
 }
 
+// TestInvalidCredentials checks that bad credentials return unauthorized.
 func TestInvalidCredentials(t *testing.T) {
 	ctx := setupTest(t)
 	defer tearDown(t, ctx)
+
 	resp := attemptLogin(t, ctx, nil, "admin", "bogus", "")
-	got := resp.StatusCode
-	expected := http.StatusUnauthorized
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected status %d but got %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 }
 
+// TestSuccessfulLogin ensures valid credentials login successfully.
 func TestSuccessfulLogin(t *testing.T) {
 	ctx := setupTest(t)
 	defer tearDown(t, ctx)
+
 	resp := attemptLogin(t, ctx, nil, "admin", "gophish", "")
-	got := resp.StatusCode
-	expected := http.StatusOK
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status %d but got %d", http.StatusOK, resp.StatusCode)
 	}
 }
 
+// TestSuccessfulRedirect validates login redirect with a "next" parameter.
 func TestSuccessfulRedirect(t *testing.T) {
 	ctx := setupTest(t)
 	defer tearDown(t, ctx)
+
 	next := "/campaigns"
 	client := &http.Client{
+		// Prevent auto-following redirect, so we can inspect Location header.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
-		}}
+		},
+	}
+
 	resp := attemptLogin(t, ctx, client, "admin", "gophish", fmt.Sprintf("?next=%s", next))
-	got := resp.StatusCode
-	expected := http.StatusFound
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("expected status %d but got %d", http.StatusFound, resp.StatusCode)
 	}
-	url, err := resp.Location()
+
+	location, err := resp.Location()
 	if err != nil {
-		t.Fatalf("error parsing response Location header: %v", err)
+		t.Fatalf("error reading Location header: %v", err)
 	}
-	if url.Path != next {
-		t.Fatalf("unexpected Location header received. expected %s got %s", next, url.Path)
+
+	if location.Path != next {
+		t.Fatalf("expected redirect to %s but got %s", next, location.Path)
 	}
 }
 
+// TestAccountLocked verifies login fails for a locked account.
 func TestAccountLocked(t *testing.T) {
 	ctx := setupTest(t)
 	defer tearDown(t, ctx)
+
 	resp := attemptLogin(t, ctx, nil, "houdini", "gophish", "")
-	got := resp.StatusCode
-	expected := http.StatusUnauthorized
-	if got != expected {
-		t.Fatalf("invalid status code received. expected %d got %d", expected, got)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("expected status %d but got %d", http.StatusUnauthorized, resp.StatusCode)
 	}
 }
