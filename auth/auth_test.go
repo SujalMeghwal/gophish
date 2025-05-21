@@ -4,38 +4,44 @@ import (
 	"testing"
 )
 
-func TestPasswordPolicy(t *testing.T) {
-	candidate := "short"
-	got := CheckPasswordPolicy(candidate)
-	if got != ErrPasswordTooShort {
-		t.Fatalf("unexpected error received. expected %v got %v", ErrPasswordTooShort, got)
+func TestCheckPasswordPolicy(t *testing.T) {
+	tests := []struct {
+		password string
+		wantErr  error
+	}{
+		{"short", ErrPasswordTooShort},
+		{"valid password", nil},
 	}
 
-	candidate = "valid password"
-	got = CheckPasswordPolicy(candidate)
-	if got != nil {
-		t.Fatalf("unexpected error received. expected %v got %v", nil, got)
+	for _, tt := range tests {
+		err := CheckPasswordPolicy(tt.password)
+		if err != tt.wantErr {
+			t.Errorf("CheckPasswordPolicy(%q) = %v; want %v", tt.password, err, tt.wantErr)
+		}
 	}
 }
 
 func TestValidatePasswordChange(t *testing.T) {
-	newPassword := "valid password"
-	confirmPassword := "invalid"
 	currentPassword := "current password"
 	currentHash, err := GeneratePasswordHash(currentPassword)
 	if err != nil {
-		t.Fatalf("unexpected error generating password hash: %v", err)
+		t.Fatalf("failed to generate password hash: %v", err)
 	}
 
-	_, got := ValidatePasswordChange(currentHash, newPassword, confirmPassword)
-	if got != ErrPasswordMismatch {
-		t.Fatalf("unexpected error received. expected %v got %v", ErrPasswordMismatch, got)
+	tests := []struct {
+		newPassword     string
+		confirmPassword string
+		wantErr         error
+	}{
+		{"valid password", "invalid", ErrPasswordMismatch},
+		{currentPassword, currentPassword, ErrReusedPassword},
+		{"newStrongPass1!", "newStrongPass1!", nil}, // Assuming this is valid and different
 	}
 
-	newPassword = currentPassword
-	confirmPassword = newPassword
-	_, got = ValidatePasswordChange(currentHash, newPassword, confirmPassword)
-	if got != ErrReusedPassword {
-		t.Fatalf("unexpected error received. expected %v got %v", ErrReusedPassword, got)
+	for _, tt := range tests {
+		_, err := ValidatePasswordChange(currentHash, tt.newPassword, tt.confirmPassword)
+		if err != tt.wantErr {
+			t.Errorf("ValidatePasswordChange(%q, %q) = %v; want %v", tt.newPassword, tt.confirmPassword, err, tt.wantErr)
+		}
 	}
 }
