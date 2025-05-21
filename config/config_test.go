@@ -2,8 +2,8 @@ package config
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -11,68 +11,88 @@ import (
 )
 
 var validConfig = []byte(`{
-	"admin_server": {
-		"listen_url": "127.0.0.1:3333",
-		"use_tls": true,
-		"cert_path": "gophish_admin.crt",
-		"key_path": "gophish_admin.key"
-	},
-	"phish_server": {
-		"listen_url": "0.0.0.0:8080",
-		"use_tls": false,
-		"cert_path": "example.crt",
-		"key_path": "example.key"
-	},
-	"db_name": "sqlite3",
-	"db_path": "gophish.db",
-	"migrations_prefix": "db/db_",
-	"contact_address": ""
+  "admin_server": {
+    "listen_url": "127.0.0.1:8443",
+    "use_tls": true,
+    "cert_path": "certs/admin.crt",
+    "key_path": "certs/admin.key",
+    "trusted_origins": [
+      "https://admin.gophish.local"
+    ]
+  },
+  "phish_server": {
+    "listen_url": "0.0.0.0:8080",
+    "use_tls": false,
+    "cert_path": "certs/phish.crt",
+    "key_path": "certs/phish.key"
+  },
+  "db_name": "sqlite3",
+  "db_path": "data/gophish.db",
+  "migrations_prefix": "db/migrations/",
+  "contact_address": "admin@gophish.tld",
+  "logging": {
+    "filename": "logs/gophish.log",
+    "level": "info"
+  }
 }`)
 
-func createTemporaryConfig(t *testing.T) *os.File {
-	f, err := ioutil.TempFile("", "gophish-config")
+func createTempConfigFile(t *testing.T, content []byte) (string, func()) {
+	t.Helper()
+	tmpFile, err := os.CreateTemp("", "gophish-config-*.json")
 	if err != nil {
-		t.Fatalf("unable to create temporary config: %v", err)
+		t.Fatalf("unable to create temporary config file: %v", err)
 	}
-	return f
-}
 
-func removeTemporaryConfig(t *testing.T, f *os.File) {
-	err := f.Close()
-	if err != nil {
-		t.Fatalf("unable to remove temporary config: %v", err)
+	if _, err := tmpFile.Write(content); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		t.Fatalf("unable to write to temporary config file: %v", err)
 	}
+
+	if err := tmpFile.Close(); err != nil {
+		os.Remove(tmpFile.Name())
+		t.Fatalf("unable to close temporary config file: %v", err)
+	}
+
+	cleanup := func() {
+		os.Remove(tmpFile.Name())
+	}
+
+	return tmpFile.Name(), cleanup
 }
 
 func TestLoadConfig(t *testing.T) {
-	f := createTemporaryConfig(t)
-	defer removeTemporaryConfig(t, f)
-	_, err := f.Write(validConfig)
+	configPath, cleanup := createTempConfigFile(t, validConfig)
+	defer cleanup()
+
+	conf, err := LoadConfig(configPath)
 	if err != nil {
-		t.Fatalf("error writing config to temporary file: %v", err)
-	}
-	// Load the valid config
-	conf, err := LoadConfig(f.Name())
-	if err != nil {
-		t.Fatalf("error loading config from temporary file: %v", err)
+		t.Fatalf("unexpected error loading config: %v", err)
 	}
 
-	expectedConfig := &Config{}
-	err = json.Unmarshal(validConfig, &expectedConfig)
-	if err != nil {
-		t.Fatalf("error unmarshaling config: %v", err)
-	}
-	expectedConfig.MigrationsPath = expectedConfig.MigrationsPath + expectedConfig.DBName
-	expectedConfig.TestFlag = false
-	expectedConfig.AdminConf.CSRFKey = ""
-	expectedConfig.Logging = &log.Config{}
-	if !reflect.DeepEqual(expectedConfig, conf) {
-		t.Fatalf("invalid config received. expected %#v got %#v", expectedConfig, conf)
+	expected := &Config{}
+	if err := json.Unmarshal(validConfig, expected); err != nil {
+		t.Fatalf("error unmarshaling validConfig JSON: %v", err)
 	}
 
-	// Load an invalid config
-	_, err = LoadConfig("bogusfile")
+	// Update expected according to post-load processing in LoadConfig
+	expected.MigrationsPath = filepath.Join(expected.MigrationsPath, expected.DBName)
+	expected.TestFlag = false
+	if expected.AdminConf.CSRFKey == "" {
+		// Explicitly set to empty string if missing in JSON
+		expected.AdminConf.CSRFKey = ""
+	}
+	if expected.Logging == nil {
+		expected.Logging = &log.Config{}
+	}
+
+	if !reflect.DeepEqual(expected, conf) {
+		t.Fatalf("config mismatch:\nexpected: %#v\ngot: %#v", expected, conf)
+	}
+
+	// Check loading a non-existent config triggers an error
+	_, err = LoadConfig("nonexistent_file.json")
 	if err == nil {
-		t.Fatalf("expected error when loading invalid config, but got %v", err)
+		t.Fatalf("expected error when loading non-existent config file, but got none")
 	}
 }
